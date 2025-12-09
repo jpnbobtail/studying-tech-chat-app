@@ -103,3 +103,85 @@ export const POST = withAuth(async (request: NextRequest, { params }: Params, us
     return NextResponse.json({ error: 'メッセージの投稿に失敗しました' }, { status: 500 });
   }
 });
+
+// src/app/api/messages/[channelId]/[messageId]/route.ts
+import { NextResponse } from 'next/server';
+import { getServerSession } from '@/lib/auth-server';
+import prisma from '@/lib/prisma';
+
+export async function PATCH(req: Request, { params }: { params: { channelId: string, messageId: string }}) {
+  const session = await getServerSession();
+  if (!session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
+  const { channelId, messageId } = params;
+  const body = await req.json();
+  const { content } = body;
+  if (typeof content !== 'string' || content.trim() === '') {
+    return NextResponse.json({ error: 'Invalid content' }, { status: 400 });
+  }
+
+  // 権限チェック：メッセージの senderId と session.user.id を確認
+  const msg = await prisma.message.findUnique({ where: { id: messageId }});
+  if (!msg || msg.channelId !== channelId) {
+    return NextResponse.json({ error: 'Message not found' }, { status: 404 });
+  }
+  if (msg.senderId !== session.user.id) {
+    return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+  }
+
+  const updated = await prisma.message.update({
+    where: { id: messageId },
+    data: { content, updatedAt: new Date() }
+  });
+
+  // 任意: postgres_changes トリガーで Supabase Realtime が新着イベントを出す想定
+  return NextResponse.json({ message: updated });
+}
+
+export async function DELETE(req: Request, { params }: { params: { channelId: string, messageId: string }}) {
+  const session = await getServerSession();
+  if (!session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
+  const { channelId, messageId } = params;
+  const msg = await prisma.message.findUnique({ where: { id: messageId }});
+  if (!msg || msg.channelId !== channelId) return NextResponse.json({ error: 'Message not found' }, { status: 404 });
+  // 削除は送信者またはチャンネルの管理者のみ可能（要件に合わせて調整）
+  if (msg.senderId !== session.user.id) {
+    // 例: チャンネル作成者かどうか確認する場合は追加チェック
+    const channel = await prisma.channel.findUnique({ where: { id: channelId }});
+    if (!channel || channel.creatorId !== session.user.id) {
+      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+    }
+  }
+
+  await prisma.message.delete({ where: { id: messageId }});
+  return NextResponse.json({ ok: true });
+}
+
+// src/app/api/channels/[channelId]/route.ts
+import { NextResponse } from 'next/server';
+import prisma from '@/lib/prisma';
+import { getServerSession } from '@/lib/auth-server';
+
+export async function PATCH(req: Request, { params }: { params: { channelId: string }}) {
+  const session = await getServerSession();
+  if (!session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
+  const { channelId } = params;
+  const { name, description } = await req.json();
+
+  const channel = await prisma.channel.findUnique({ where: { id: channelId }});
+  if (!channel) return NextResponse.json({ error: 'Not found' }, { status: 404 });
+  if (channel.creatorId !== session.user.id) return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+
+  const updated = await prisma.channel.update({
+    where: { id: channelId },
+    data: {
+      name: name ?? channel.name,
+      description: description ?? channel.description,
+      updatedAt: new Date(),
+    }
+  });
+
+  return NextResponse.json({ channel: updated });
+}
